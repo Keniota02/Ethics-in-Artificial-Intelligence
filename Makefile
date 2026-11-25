@@ -15,4 +15,4 @@ format:
 format-check:
 	python -m ruff format --check src tests experiments
 
-check: lint format-check testss
+check: lint format-check test
