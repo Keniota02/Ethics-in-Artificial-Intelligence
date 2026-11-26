@@ -69,7 +69,7 @@ def simulate_pipeline(
         Weight assigned to latent talent in observed performance.
     adult_maturation_weight:
         Weight assigned to biological maturity in the Oracle's adult-potential target.
-    
+
 
     Returns
     -------
@@ -304,7 +304,7 @@ def simulate(
         Simulation configuration. If None, default values are used.
     selector:
         Selection strategy. Defaults to PerformanceSelector
-    
+
     Returns
     -------
     pd.DataFrame
