@@ -37,6 +37,7 @@ def simulate_pipeline(
     selector: Selector | None = None,
     *,
     talent_weight: float = 1.0,
+    adult_maturation_weight: float = 0.0,
 ) -> pd.DataFrame:
     """Simulate a multi-stage athlete selection process.
 
@@ -64,6 +65,11 @@ def simulate_pipeline(
         NumPy random number generator. If None, a new generator is created.
     selector:
         Selection strategy. Defaults to PerformanceSelector.
+    talent_weight:
+        Weight assigned to latent talent in observed performance.
+    adult_maturation_weight:
+        Weight assigned to biological maturity in the Oracle's adult-potential target.
+
 
     Returns
     -------
@@ -134,6 +140,9 @@ def simulate_pipeline(
     exposure_gain = _validate_non_negative_parameter("exposure_gain", exposure_gain)
     maturation_decay = _validate_non_negative_parameter("maturation_decay", maturation_decay)
     talent_weight = _validate_non_negative_parameter("talent_weight", talent_weight)
+    adult_maturation_weight = _validate_non_negative_parameter(
+        "adult_maturation_weight", adult_maturation_weight
+    )
 
     if maturation_decay > 1.0:
         raise ValueError("maturation_decay must be in the interval [0, 1].")
@@ -250,6 +259,7 @@ def simulate_pipeline(
             candidates=stage_data,
             history=history,
             judgement_noise=judgement_noise[stage][pool_positions],
+            adult_maturation_weight=adult_maturation_weight,
         )
 
         # Select the k athletes with the highest selector scores.
@@ -293,7 +303,7 @@ def simulate(
     config:
         Simulation configuration. If None, default values are used.
     selector:
-        Selection strategy. Defaults to PerformanceSelector.
+        Selection strategy. Defaults to PerformanceSelector
 
     Returns
     -------
@@ -326,4 +336,5 @@ def simulate(
         rng=rng,
         selector=selector,
         talent_weight=config.talent_weight,
+        adult_maturation_weight=config.adult_maturation_weight,
     )

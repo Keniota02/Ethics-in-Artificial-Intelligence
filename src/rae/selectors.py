@@ -34,6 +34,7 @@ class StageContext:
     candidates: pd.DataFrame
     history: np.ndarray
     judgement_noise: np.ndarray
+    adult_maturation_weight: float = 0.0
 
     def __post_init__(self):
         """Validate the consistency of the stage context."""
@@ -69,6 +70,23 @@ class StageContext:
         if not np.isfinite(judgement_noise).all():
             raise ValueError("judgement_noise must contain only finite values.")
 
+        if isinstance(self.adult_maturation_weight, (bool, np.bool_)) or not isinstance(
+            self.adult_maturation_weight,
+            (int, float, np.integer, np.floating),
+        ):
+            raise TypeError("adult_maturation_weight must be a numeric value.")
+
+        adult_maturation_weight = float(self.adult_maturation_weight)
+
+        if not np.isfinite(adult_maturation_weight) or adult_maturation_weight < 0.0:
+            raise ValueError("adult_maturation_weight must be finite and non-negative.")
+
+        object.__setattr__(
+            self,
+            "adult_maturation_weight",
+            adult_maturation_weight,
+        )
+
     @property
     def observed(self) -> np.ndarray:
         """Return the performance observed at the current stage."""
@@ -89,6 +107,34 @@ class PerformanceSelector:
 
     def scores(self, context: StageContext) -> np.ndarray:
         return context.observed
+
+
+@dataclass(frozen=True)
+class OracleSelector:
+    """Ideal benchmark selector based on adult talent potential.
+
+    The Oracle has access to latent talent and biological maturity,
+    which are not directly observable by real-world selectors.
+
+    Its target is:
+
+        adult_potential = talent + adult_maturation_weight * maturity
+    """
+
+    def scores(self, context: StageContext) -> np.ndarray:
+        """Return each candidate's latent adult potential."""
+        required_columns = {"talent", "maturity"}
+
+        if not required_columns.issubset(context.candidates.columns):
+            raise ValueError("candidates must contain 'talent' and 'maturity'.")
+
+        talent = context.candidates["talent"].to_numpy(dtype=float)
+        maturity = context.candidates["maturity"].to_numpy(dtype=float)
+
+        if not np.isfinite(talent).all() or not np.isfinite(maturity).all():
+            raise ValueError("talent and maturity must contain only finite values.")
+
+        return talent + context.adult_maturation_weight * maturity
 
 
 @dataclass(frozen=True)
