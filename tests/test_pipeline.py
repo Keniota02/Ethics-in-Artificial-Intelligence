@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from rae.pipeline import simulate_pipeline
+from rae.selectors import PerformanceSelector, ScoutSelector
 
 
 def create_test_population(n=20, seed=42):
@@ -450,3 +451,92 @@ def test_invalid_random_generator_raises_type_error():
 
     with pytest.raises(TypeError):
         simulate_pipeline(population, rng=43)
+
+
+def test_default_selector_matches_explicit_performance_selector():
+    """The default pipeline must use the performance selector."""
+    population = create_test_population(n=100)
+
+    default_result = simulate_pipeline(
+        population,
+        rng=np.random.default_rng(43),
+    )
+
+    explicit_result = simulate_pipeline(
+        population,
+        selector=PerformanceSelector(),
+        rng=np.random.default_rng(43),
+    )
+
+    pd.testing.assert_frame_equal(default_result, explicit_result)
+
+
+def test_scout_without_memory_matches_performance_selector():
+    """A memoryless, noiseless scout must match the baseline selector."""
+    population = create_test_population(n=100)
+
+    baseline_result = simulate_pipeline(
+        population,
+        selector=PerformanceSelector(),
+        rng=np.random.default_rng(43),
+    )
+
+    scout_result = simulate_pipeline(
+        population,
+        selector=ScoutSelector(memory=0.0),
+        rng=np.random.default_rng(43),
+    )
+
+    pd.testing.assert_frame_equal(baseline_result, scout_result)
+
+
+def test_scout_selector_integrates_with_pipeline():
+    """The scout must complete all selection stages successfully."""
+    population = create_test_population(n=1000)
+
+    result = simulate_pipeline(
+        population,
+        selector=ScoutSelector(
+            memory=1.0,
+            noise_sd=0.5,
+        ),
+        dropout_unselected=0.0,
+        rng=np.random.default_rng(43),
+    )
+
+    selected_counts = result.groupby("stage")["selected"].sum().tolist()
+
+    assert selected_counts == [300, 200, 100]
+    assert result["selected"].dtype == bool
+    assert result["dropped_out"].dtype == bool
+
+
+def test_scout_maturation_bias_works_in_pipeline():
+    """The pipeline must support an explicit scout preference for maturity."""
+    population = create_test_population(n=100)
+
+    result = simulate_pipeline(
+        population,
+        selector=ScoutSelector(
+            memory=1.0,
+            maturation_bias=0.5,
+            noise_sd=0.0,
+        ),
+        dropout_unselected=0.0,
+        rng=np.random.default_rng(43),
+    )
+
+    selected_counts = result.groupby("stage")["selected"].sum().tolist()
+
+    assert selected_counts == [30, 20, 10]
+
+
+def test_pipeline_rejects_invalid_selector():
+    """The pipeline must reject objects without a scores method."""
+    population = create_test_population(n=100)
+
+    with pytest.raises(TypeError):
+        simulate_pipeline(
+            population,
+            selector=object(),
+        )

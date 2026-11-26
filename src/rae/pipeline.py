@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from rae.performance import generate_performance
-from rae.selection import select_top_k
+from rae.selectors import PerformanceSelector, Selector, StageContext, choose
 
 
 def _validate_non_negative_parameter(name: str, value: float) -> float:
@@ -32,6 +32,7 @@ def simulate_pipeline(
     exposure_gain: float = 1.0,
     dropout_unselected: float = 0.2,
     rng: np.random.Generator | None = None,
+    selector: Selector | None = None,
 ) -> pd.DataFrame:
     """Simulate a multi-stage athlete selection process.
 
@@ -50,13 +51,15 @@ def simulate_pipeline(
         Standard deviation of performance noise.
     exposure_weight:
         Weight assigned to accumulated training exposure.
-        A value of zero disables the performance feedback effect.
+        A value of zero disables the exposure contribution to performance.
     exposure_gain:
         Exposure units gained for every previous selection.
     dropout_unselected:
         Probability that an unselected athlete leaves the system after a stage.
     rng:
         NumPy random number generator. If None, a new generator is created.
+    selector:
+        Selection strategy. Defaults to PerformanceSelector.
 
     Returns
     -------
@@ -125,7 +128,6 @@ def simulate_pipeline(
     sigma_p = _validate_non_negative_parameter("sigma_p", sigma_p)
     exposure_weight = _validate_non_negative_parameter("exposure_weight", exposure_weight)
     exposure_gain = _validate_non_negative_parameter("exposure_gain", exposure_gain)
-
     maturation_decay = _validate_non_negative_parameter("maturation_decay", maturation_decay)
 
     if maturation_decay > 1.0:
@@ -141,26 +143,33 @@ def simulate_pipeline(
     if not np.isfinite(dropout_unselected) or not 0.0 <= dropout_unselected <= 1.0:
         raise ValueError("dropout_unselected must be in the interval [0, 1].")
 
+    # Initialize the selector.
+    if selector is None:
+        selector = PerformanceSelector()
+    elif not callable(getattr(selector, "scores", None)):
+        raise TypeError("selector must implement a callable scores(context) method.")
+
     # Initialize the random number generator.
     if rng is None:
         rng = np.random.default_rng()
     elif not isinstance(rng, np.random.Generator):
         raise TypeError("rng must be a NumPy Generator or None.")
 
-    # Create independent random streams for each stage and for dropout.
+    # Create independent random streams.
     child_seeds = rng.integers(
         0,
         np.iinfo(np.uint32).max,
-        size=n_stages + 1,
+        size=2 * n_stages + 1,
         dtype=np.uint32,
     )
 
     stage_rngs = [np.random.default_rng(int(seed)) for seed in child_seeds[:n_stages]]
 
-    dropout_rng = np.random.default_rng(int(child_seeds[-1]))
+    dropout_rng = np.random.default_rng(int(child_seeds[n_stages]))
 
-    # Pre-generate performance and dropout randomness for the entire population.
-    # This keeps random draws independent of which athletes remain in the pool.
+    selector_rngs = [np.random.default_rng(int(seed)) for seed in child_seeds[n_stages + 1 :]]
+
+    # Pre-generate performance noise for the entire population.
     stage_performances = []
 
     for stage, stage_rng in enumerate(stage_rngs):
@@ -180,18 +189,26 @@ def simulate_pipeline(
             )
         )
 
+    # Pre-generate subjective judgement noise for the entire population.
+    judgement_noise = [selector_rng.standard_normal(n) for selector_rng in selector_rngs]
+
+    # Pre-generate dropout randomness for every athlete and stage.
     dropout_draws = dropout_rng.random((n_stages, n))
 
-    # Initialize the simulation state.
+    # Initialize simulation state.
     in_pool = np.ones(n, dtype=bool)
     times_selected = np.zeros(n, dtype=int)
+
+    # Store observed performance to construct the history available to selectors.
+    observed_history = np.full((n_stages, n), np.nan)
+
     stage_records = []
 
     # Simulate each selection stage.
     for stage, fraction in enumerate(fractions):
         pool_positions = np.flatnonzero(in_pool)
 
-        # The selection quota is always calculated from the initial population.
+        # Selection quotas are calculated from the initial population.
         k = round(fraction * n)
 
         if k > len(pool_positions):
@@ -199,7 +216,7 @@ def simulate_pipeline(
                 f"stage {stage}: cannot select {k} athletes from a pool of {len(pool_positions)}."
             )
 
-        # Build the DataFrame for the current candidate pool.
+        # Build the candidate DataFrame.
         stage_data = population.iloc[pool_positions].copy().reset_index(drop=True)
 
         previous_selections = times_selected[pool_positions]
@@ -207,23 +224,34 @@ def simulate_pipeline(
 
         base_performance, performance_noise = stage_performances[stage]
 
-        # Add stage-specific variables.
         stage_data["stage"] = stage
         stage_data["times_selected_before"] = previous_selections
         stage_data["exposure"] = exposure
         stage_data["performance_noise"] = performance_noise[pool_positions]
 
-        # Calculate performance including the exposure feedback effect.
+        # Calculate observed performance, including the exposure contribution.
         stage_data["performance"] = base_performance[pool_positions] + exposure_weight * exposure
 
-        # Select the k highest-performing athletes.
-        selected_data = select_top_k(
-            stage_data,
-            k=k,
-            score_column="performance",
+        # Update the performance history for current candidates.
+        observed_history[stage, pool_positions] = stage_data["performance"].to_numpy()
+
+        history = observed_history[: stage + 1, pool_positions]
+
+        # Create the context provided to the selector.
+        context = StageContext(
+            stage=stage,
+            n_stages=n_stages,
+            candidates=stage_data,
+            history=history,
+            judgement_noise=judgement_noise[stage][pool_positions],
         )
 
-        selected_positions = selected_data.index.to_numpy(dtype=int)
+        # Select the k athletes with the highest selector scores.
+        selected_positions = choose(
+            selector,
+            context,
+            k=k,
+        )
 
         selected_mask = np.zeros(len(pool_positions), dtype=bool)
         selected_mask[selected_positions] = True
