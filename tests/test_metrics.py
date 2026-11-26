@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from rae.metrics import summarize_selection_by_quarter
+from rae.metrics import (
+    summarize_selection_by_quarter,
+    summarize_talent_loss_by_quarter,
+    summarize_talent_metrics,
+)
 
 
 @pytest.fixture
@@ -296,3 +300,234 @@ def test_athlete_cannot_be_observed_after_dropout(simulation_log):
 
     with pytest.raises(ValueError):
         summarize_selection_by_quarter(invalid)
+
+
+@pytest.fixture
+def talent_simulation():
+    """Create a deterministic two-stage simulation for talent metrics."""
+    rows = []
+
+    talent = [10.0, 0.0, 9.0, 1.0, 8.0, 2.0, 7.0, 3.0]
+    quarters = [1, 1, 2, 2, 3, 3, 4, 4]
+
+    selected_stage_0 = {0, 2, 4, 7}
+    selected_stage_1 = {0, 2, 4, 6}
+
+    for athlete_id in range(8):
+        selected_0 = athlete_id in selected_stage_0
+        selected_1 = athlete_id in selected_stage_1
+
+        for stage, selected in [
+            (0, selected_0),
+            (1, selected_1),
+        ]:
+            rows.append(
+                {
+                    "athlete_id": athlete_id,
+                    "stage": stage,
+                    "birth_quarter": quarters[athlete_id],
+                    "talent": talent[athlete_id],
+                    "maturity": 0.0,
+                    "selected": selected,
+                    "dropped_out": False,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def test_talent_loss_by_quarter_has_expected_structure(talent_simulation):
+    """The output must contain one row per stage and birth quarter."""
+    result = summarize_talent_loss_by_quarter(
+        talent_simulation,
+        top_talent_fraction=0.5,
+    )
+
+    assert len(result) == 8
+    assert set(result["stage"]) == {0, 1}
+    assert set(result["birth_quarter"]) == {1, 2, 3, 4}
+
+    expected_columns = {
+        "stage",
+        "birth_quarter",
+        "n_initial",
+        "n_high_talent",
+        "n_selected_high_talent",
+        "n_lost_high_talent",
+        "talent_loss",
+    }
+
+    assert expected_columns.issubset(result.columns)
+
+
+def test_talent_loss_by_quarter_is_calculated_correctly(talent_simulation):
+    """The initial high-talent athletes must be the denominator."""
+    result = summarize_talent_loss_by_quarter(
+        talent_simulation,
+        top_talent_fraction=0.5,
+    )
+
+    stage_zero = result.loc[result["stage"] == 0].set_index("birth_quarter")
+
+    assert stage_zero["n_high_talent"].to_dict() == {
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 1,
+    }
+
+    assert stage_zero["n_selected_high_talent"].to_dict() == {
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 0,
+    }
+
+    np.testing.assert_allclose(
+        stage_zero["talent_loss"].to_numpy(),
+        [0.0, 0.0, 0.0, 1.0],
+    )
+
+
+def test_later_stage_talent_loss_uses_initial_high_talent_cohort(talent_simulation):
+    """Later stages must retain the initial cohort as denominator."""
+    result = summarize_talent_loss_by_quarter(
+        talent_simulation,
+        top_talent_fraction=0.5,
+    )
+
+    stage_one = result.loc[result["stage"] == 1]
+
+    np.testing.assert_allclose(
+        stage_one["talent_loss"].to_numpy(),
+        [0.0, 0.0, 0.0, 0.0],
+    )
+
+
+def test_summary_calculates_fairness_and_efficiency_metrics(talent_simulation):
+    """Overall loss, opportunity gap, efficiency and regret must be correct."""
+    result = summarize_talent_metrics(
+        talent_simulation,
+        top_talent_fraction=0.5,
+    ).set_index("stage")
+
+    stage_zero = result.loc[0]
+    stage_one = result.loc[1]
+
+    assert stage_zero["overall_talent_loss"] == pytest.approx(0.25)
+    assert stage_zero["equal_opportunity_gap"] == pytest.approx(1.0)
+    assert stage_zero["mean_selected_talent"] == pytest.approx(7.5)
+    assert stage_zero["regret"] == pytest.approx(1.0)
+
+    assert stage_one["overall_talent_loss"] == pytest.approx(0.0)
+    assert stage_one["equal_opportunity_gap"] == pytest.approx(0.0)
+    assert stage_one["mean_selected_talent"] == pytest.approx(8.5)
+    assert stage_one["regret"] == pytest.approx(0.0)
+
+
+def test_oracle_has_zero_regret(talent_simulation):
+    """Selecting the highest target values must produce zero regret."""
+    result = summarize_talent_metrics(
+        talent_simulation,
+        top_talent_fraction=0.5,
+    ).set_index("stage")
+
+    assert result.loc[1, "regret"] == pytest.approx(0.0)
+
+
+def test_adult_maturation_weight_changes_talent_target(talent_simulation):
+    """Adult maturation must affect high-talent identification and metrics."""
+    modified = talent_simulation.copy()
+
+    modified.loc[
+        modified["athlete_id"] == 7,
+        "maturity",
+    ] = 10.0
+
+    result_talent = summarize_talent_loss_by_quarter(
+        modified,
+        top_talent_fraction=0.5,
+        adult_maturation_weight=0.0,
+    )
+
+    result_adult = summarize_talent_loss_by_quarter(
+        modified,
+        top_talent_fraction=0.5,
+        adult_maturation_weight=1.0,
+    )
+
+    q4_talent = result_talent.loc[
+        (result_talent["stage"] == 0) & (result_talent["birth_quarter"] == 4),
+        "talent_loss",
+    ].iloc[0]
+
+    q4_adult = result_adult.loc[
+        (result_adult["stage"] == 0) & (result_adult["birth_quarter"] == 4),
+        "talent_loss",
+    ].iloc[0]
+
+    assert q4_talent == pytest.approx(1.0)
+    assert q4_adult == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    "fraction",
+    [0.0, 1.0, -0.1, 1.1, np.nan, np.inf],
+)
+def test_invalid_top_talent_fraction_is_rejected(talent_simulation, fraction):
+    """The high-talent fraction must be finite and between zero and one."""
+    with pytest.raises(ValueError):
+        summarize_talent_metrics(
+            talent_simulation,
+            top_talent_fraction=fraction,
+        )
+
+
+@pytest.mark.parametrize(
+    "weight",
+    [-0.1, np.nan, np.inf, -np.inf],
+)
+def test_invalid_adult_maturation_weight_is_rejected(talent_simulation, weight):
+    """Adult maturation weight must be finite and non-negative."""
+    with pytest.raises(ValueError):
+        summarize_talent_metrics(
+            talent_simulation,
+            adult_maturation_weight=weight,
+        )
+
+
+def test_non_numeric_talent_metric_parameters_are_rejected(talent_simulation):
+    """Metric parameters must be numeric and cannot be booleans."""
+    with pytest.raises(TypeError):
+        summarize_talent_metrics(
+            talent_simulation,
+            top_talent_fraction=True,
+        )
+
+    with pytest.raises(TypeError):
+        summarize_talent_metrics(
+            talent_simulation,
+            adult_maturation_weight="0.5",
+        )
+
+
+def test_non_finite_talent_values_are_rejected(talent_simulation):
+    """Latent talent must contain finite values."""
+    invalid = talent_simulation.copy()
+    invalid.loc[0, "talent"] = np.nan
+
+    with pytest.raises(ValueError):
+        summarize_talent_metrics(invalid)
+
+
+def test_inconsistent_talent_values_across_stages_are_rejected(talent_simulation):
+    """An athlete must retain the same latent talent across all stages."""
+    invalid = talent_simulation.copy()
+
+    invalid.loc[
+        (invalid["athlete_id"] == 0) & (invalid["stage"] == 1),
+        "talent",
+    ] = 999.0
+
+    with pytest.raises(ValueError):
+        summarize_talent_metrics(invalid)
