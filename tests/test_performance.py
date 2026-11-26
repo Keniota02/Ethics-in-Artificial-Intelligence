@@ -59,6 +59,32 @@ def test_performance_is_calculated_correctly():
     )
 
 
+def test_performance_respects_talent_weight():
+    """Check that talent_weight controls the contribution of latent talent."""
+    population = create_test_population(n=100)
+
+    talent_weight = 1.7
+    beta_m = 0.5
+
+    result = generate_performance(
+        population,
+        beta_m=beta_m,
+        talent_weight=talent_weight,
+        rng=np.random.default_rng(43),
+    )
+
+    expected_performance = (
+        talent_weight * population["talent"]
+        + beta_m * population["maturity"]
+        + result["performance_noise"]
+    )
+
+    np.testing.assert_allclose(
+        result["performance"],
+        expected_performance,
+    )
+
+
 def test_performance_does_not_modify_original_population():
     """Check that the input population remains unchanged."""
     population = create_test_population(n=100)
@@ -243,7 +269,7 @@ def test_negative_sigma_p_raises_value_error(sigma_p):
 
 @pytest.mark.parametrize(
     "parameter",
-    ["beta_m", "sigma_p"],
+    ["beta_m", "sigma_p", "talent_weight"],
 )
 @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
 def test_non_finite_parameters_raise_value_error(parameter, value):
@@ -256,7 +282,7 @@ def test_non_finite_parameters_raise_value_error(parameter, value):
 
 @pytest.mark.parametrize(
     "parameter",
-    ["beta_m", "sigma_p"],
+    ["beta_m", "sigma_p", "talent_weight"],
 )
 @pytest.mark.parametrize("value", ["invalid", None, True])
 def test_non_numeric_parameters_raise_type_error(parameter, value):
@@ -276,3 +302,12 @@ def test_invalid_random_generator_raises_type_error():
             population,
             rng=43,
         )
+
+
+@pytest.mark.parametrize("talent_weight", [-0.1, -1.0])
+def test_negative_talent_weight_raises_value_error(talent_weight):
+    """A negative talent weight should raise ValueError."""
+    population = create_test_population()
+
+    with pytest.raises(ValueError):
+        generate_performance(population, talent_weight=talent_weight)

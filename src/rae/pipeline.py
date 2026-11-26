@@ -3,7 +3,9 @@
 import numpy as np
 import pandas as pd
 
+from rae.config import SimConfig
 from rae.performance import generate_performance
+from rae.population import generate_population
 from rae.selectors import PerformanceSelector, Selector, StageContext, choose
 
 
@@ -33,6 +35,8 @@ def simulate_pipeline(
     dropout_unselected: float = 0.2,
     rng: np.random.Generator | None = None,
     selector: Selector | None = None,
+    *,
+    talent_weight: float = 1.0,
 ) -> pd.DataFrame:
     """Simulate a multi-stage athlete selection process.
 
@@ -129,6 +133,7 @@ def simulate_pipeline(
     exposure_weight = _validate_non_negative_parameter("exposure_weight", exposure_weight)
     exposure_gain = _validate_non_negative_parameter("exposure_gain", exposure_gain)
     maturation_decay = _validate_non_negative_parameter("maturation_decay", maturation_decay)
+    talent_weight = _validate_non_negative_parameter("talent_weight", talent_weight)
 
     if maturation_decay > 1.0:
         raise ValueError("maturation_decay must be in the interval [0, 1].")
@@ -180,6 +185,7 @@ def simulate_pipeline(
             beta_m=stage_beta_m,
             sigma_p=sigma_p,
             rng=stage_rng,
+            talent_weight=talent_weight,
         )
 
         stage_performances.append(
@@ -274,3 +280,50 @@ def simulate_pipeline(
 
     # Combine all stage records into one long-format DataFrame.
     return pd.concat(stage_records, ignore_index=True)
+
+
+def simulate(
+    config: SimConfig | None = None,
+    selector: Selector | None = None,
+) -> pd.DataFrame:
+    """Generate a population and run a complete selection simulation.
+
+    Parameters
+    ----------
+    config:
+        Simulation configuration. If None, default values are used.
+    selector:
+        Selection strategy. Defaults to PerformanceSelector.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format simulation log.
+    """
+    if config is None:
+        config = SimConfig()
+    elif not isinstance(config, SimConfig):
+        raise TypeError("config must be a SimConfig instance or None.")
+
+    # Use one reproducible random generator for population and pipeline.
+    rng = np.random.default_rng(config.seed)
+
+    population = generate_population(
+        n=config.n_athletes,
+        rho=config.maturation_corr,
+        rng=rng,
+    )
+
+    return simulate_pipeline(
+        population,
+        stage_fractions=config.stage_fractions,
+        beta_m=config.maturation_weight,
+        maturation_decay=config.maturation_decay,
+        sigma_p=config.noise_sd,
+        exposure_weight=config.exposure_weight,
+        exposure_gain=config.exposure_gain,
+        dropout_unselected=config.dropout_unselected,
+        rng=rng,
+        selector=selector,
+        talent_weight=config.talent_weight,
+    )
