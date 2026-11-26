@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from rae.pipeline import simulate_pipeline
+from rae.config import SimConfig
+from rae.pipeline import simulate, simulate_pipeline
 from rae.selectors import PerformanceSelector, ScoutSelector
 
 
@@ -540,3 +541,69 @@ def test_pipeline_rejects_invalid_selector():
             population,
             selector=object(),
         )
+
+
+def test_simulate_uses_configured_population_size():
+    """The high-level simulation must generate the configured cohort."""
+    config = SimConfig(
+        n_athletes=100,
+        stage_fractions=(0.5, 0.25),
+        dropout_unselected=0.0,
+        seed=43,
+    )
+
+    result = simulate(config)
+
+    candidate_counts = result.groupby("stage").size().tolist()
+    selected_counts = result.groupby("stage")["selected"].sum().tolist()
+
+    assert candidate_counts == [100, 100]
+    assert selected_counts == [50, 25]
+
+
+def test_simulate_respects_configured_performance_weights():
+    """Observed performance must use all configured performance weights."""
+    config = SimConfig(
+        n_athletes=100,
+        stage_fractions=(0.5, 0.25),
+        talent_weight=1.7,
+        maturation_weight=2.0,
+        maturation_decay=0.7,
+        exposure_weight=0.8,
+        exposure_gain=2.0,
+        noise_sd=0.0,
+        dropout_unselected=0.0,
+        seed=43,
+    )
+
+    result = simulate(config)
+
+    expected = (
+        config.talent_weight * result["talent"]
+        + config.maturation_weight * config.maturation_decay ** result["stage"] * result["maturity"]
+        + config.exposure_weight * result["exposure"]
+    )
+
+    np.testing.assert_allclose(
+        result["performance"],
+        expected,
+    )
+
+
+def test_simulate_is_reproducible_from_configuration_seed():
+    """Equal configurations must generate identical simulation results."""
+    config = SimConfig(
+        n_athletes=200,
+        seed=123,
+    )
+
+    result_1 = simulate(config)
+    result_2 = simulate(config)
+
+    pd.testing.assert_frame_equal(result_1, result_2)
+
+
+def test_simulate_rejects_invalid_configuration_type():
+    """The high-level simulation must require a SimConfig instance."""
+    with pytest.raises(TypeError):
+        simulate({"n_athletes": 100})

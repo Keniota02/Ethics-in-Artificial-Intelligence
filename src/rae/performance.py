@@ -9,6 +9,8 @@ def generate_performance(
     beta_m: float = 0.5,
     sigma_p: float = 1.0,
     rng: np.random.Generator | None = None,
+    *,
+    talent_weight: float = 1.0,
 ) -> pd.DataFrame:
     """Generate observed performances for a synthetic athlete population.
 
@@ -22,6 +24,8 @@ def generate_performance(
         Standard deviation of the individual performance noise.
     rng:
         NumPy random number generator. If None, a new generator is created.
+    talent_weight:
+        Weight assigned to latent talent.
 
     Returns
     -------
@@ -48,7 +52,13 @@ def generate_performance(
         raise ValueError("talent and maturity must contain finite values.")
 
     # Validate the model parameters.
-    for name, value in {"beta_m": beta_m, "sigma_p": sigma_p}.items():
+    parameters = {
+        "talent_weight": talent_weight,
+        "beta_m": beta_m,
+        "sigma_p": sigma_p,
+    }
+
+    for name, value in parameters.items():
         if isinstance(value, (bool, np.bool_)) or not isinstance(
             value, (int, float, np.integer, np.floating)
         ):
@@ -57,8 +67,12 @@ def generate_performance(
         if not np.isfinite(value):
             raise ValueError(f"{name} must be finite.")
 
+    talent_weight = float(talent_weight)
     beta_m = float(beta_m)
     sigma_p = float(sigma_p)
+
+    if talent_weight < 0.0:
+        raise ValueError("talent_weight must be greater than or equal to 0.")
 
     if beta_m < 0.0:
         raise ValueError("beta_m must be greater than or equal to 0.")
@@ -80,7 +94,7 @@ def generate_performance(
     )
 
     # Calculate observed performance.
-    performance = talent + beta_m * maturity + performance_noise
+    performance = talent_weight * talent + beta_m * maturity + performance_noise
 
     # Return a copy without modifying the original population.
     result = population.copy()
