@@ -202,3 +202,259 @@ def summarize_selection_by_quarter(simulation: pd.DataFrame) -> pd.DataFrame:
             )
 
     return pd.DataFrame(rows)
+
+
+def _prepare_talent_metric_data(
+    simulation: pd.DataFrame,
+    top_talent_fraction: float,
+    adult_maturation_weight: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Validate simulation data and identify the initial high-talent cohort."""
+    if not isinstance(simulation, pd.DataFrame):
+        raise TypeError("simulation must be a pandas DataFrame.")
+
+    required_columns = {
+        "athlete_id",
+        "stage",
+        "birth_quarter",
+        "selected",
+        "dropped_out",
+        "talent",
+        "maturity",
+    }
+
+    missing_columns = required_columns.difference(simulation.columns)
+
+    if missing_columns:
+        raise ValueError(f"simulation is missing required columns: {sorted(missing_columns)}.")
+
+    # Reuse the structural validation already implemented for selection metrics.
+    summarize_selection_by_quarter(simulation)
+
+    for name, value in {
+        "top_talent_fraction": top_talent_fraction,
+        "adult_maturation_weight": adult_maturation_weight,
+    }.items():
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, float, np.integer, np.floating)
+        ):
+            raise TypeError(f"{name} must be a numeric value.")
+
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite.")
+
+    top_talent_fraction = float(top_talent_fraction)
+    adult_maturation_weight = float(adult_maturation_weight)
+
+    if not 0.0 < top_talent_fraction < 1.0:
+        raise ValueError("top_talent_fraction must be in the interval (0, 1).")
+
+    if adult_maturation_weight < 0.0:
+        raise ValueError("adult_maturation_weight must be non-negative.")
+
+    data = simulation[
+        [
+            "athlete_id",
+            "stage",
+            "birth_quarter",
+            "selected",
+            "talent",
+            "maturity",
+        ]
+    ].copy()
+
+    # Validate latent target variables.
+    for column in ("talent", "maturity"):
+        if pd.api.types.is_bool_dtype(data[column]) or not pd.api.types.is_numeric_dtype(
+            data[column]
+        ):
+            raise TypeError(f"{column} must contain numeric values.")
+
+        values = data[column].to_numpy(dtype=float)
+
+        if not np.isfinite(values).all():
+            raise ValueError(f"{column} must contain only finite values.")
+
+        data[column] = values
+
+        if data.groupby("athlete_id", sort=False)[column].nunique().gt(1).any():
+            raise ValueError(f"each athlete must have a consistent {column} value.")
+
+    # Build the initial cohort, with one row per athlete.
+    cohort = data.loc[
+        data["stage"] == 0,
+        ["athlete_id", "birth_quarter", "talent", "maturity"],
+    ].copy()
+
+    cohort["target"] = cohort["talent"] + adult_maturation_weight * cohort["maturity"]
+
+    if not np.isfinite(cohort["target"].to_numpy()).all():
+        raise ValueError("adult target must contain only finite values.")
+
+    threshold = np.quantile(
+        cohort["target"].to_numpy(),
+        1.0 - top_talent_fraction,
+    )
+
+    # Athletes tied at the threshold are all included.
+    cohort["high_talent"] = cohort["target"] >= threshold
+
+    # Attach the same target and high-talent classification to every stage record.
+    data = data.merge(
+        cohort[["athlete_id", "target", "high_talent"]],
+        on="athlete_id",
+        how="left",
+        validate="many_to_one",
+    )
+
+    return data, cohort
+
+
+def _build_talent_loss_by_quarter(
+    data: pd.DataFrame,
+    cohort: pd.DataFrame,
+) -> pd.DataFrame:
+    """Calculate stage-specific high-talent loss by birth quarter."""
+    stages = np.sort(data["stage"].unique())
+
+    initial_counts = cohort.groupby("birth_quarter")["athlete_id"].nunique()
+
+    high_counts = cohort.loc[cohort["high_talent"]].groupby("birth_quarter")["athlete_id"].nunique()
+
+    rows = []
+
+    for stage in stages:
+        current = data.loc[data["stage"] == stage]
+        selected = current.loc[current["selected"] & current["high_talent"]]
+
+        selected_high_counts = selected.groupby("birth_quarter")["athlete_id"].nunique()
+
+        for quarter in range(1, 5):
+            n_initial = int(initial_counts.get(quarter, 0))
+            n_high_talent = int(high_counts.get(quarter, 0))
+            n_selected_high = int(selected_high_counts.get(quarter, 0))
+
+            n_lost_high = n_high_talent - n_selected_high
+
+            rows.append(
+                {
+                    "stage": int(stage),
+                    "birth_quarter": quarter,
+                    "n_initial": n_initial,
+                    "n_high_talent": n_high_talent,
+                    "n_selected_high_talent": n_selected_high,
+                    "n_lost_high_talent": n_lost_high,
+                    "talent_loss": (n_lost_high / n_high_talent if n_high_talent > 0 else np.nan),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_talent_loss_by_quarter(
+    simulation: pd.DataFrame,
+    top_talent_fraction: float = 0.10,
+    adult_maturation_weight: float = 0.0,
+) -> pd.DataFrame:
+    """Summarize high-talent loss by stage and birth quarter.
+
+    High talent is defined using the top fraction of the initial cohort,
+    ranked by latent talent or adult potential.
+
+    Talent loss is the share of high-talent athletes not selected
+    at the current stage, using the initial high-talent cohort as denominator.
+    """
+    data, cohort = _prepare_talent_metric_data(
+        simulation,
+        top_talent_fraction,
+        adult_maturation_weight,
+    )
+
+    return _build_talent_loss_by_quarter(data, cohort)
+
+
+def summarize_talent_metrics(
+    simulation: pd.DataFrame,
+    top_talent_fraction: float = 0.10,
+    adult_maturation_weight: float = 0.0,
+) -> pd.DataFrame:
+    """Summarize fairness and efficiency metrics at every selection stage.
+
+    Returns one row per stage, including overall talent loss,
+    loss by birth quarter, equal-opportunity gap, mean selected target
+    and regret compared with an Oracle cohort of the same size.
+    """
+    data, cohort = _prepare_talent_metric_data(
+        simulation,
+        top_talent_fraction,
+        adult_maturation_weight,
+    )
+
+    quarter_metrics = _build_talent_loss_by_quarter(data, cohort)
+
+    initial_counts = cohort.groupby("birth_quarter")["athlete_id"].nunique()
+    n_high_talent = int(cohort["high_talent"].sum())
+    oracle_targets = np.sort(cohort["target"].to_numpy())[::-1]
+
+    rows = []
+
+    for stage in np.sort(data["stage"].unique()):
+        current = data.loc[data["stage"] == stage]
+        selected = current.loc[current["selected"]]
+
+        n_selected = len(selected)
+        n_selected_high = int(selected["high_talent"].sum())
+
+        overall_loss = 1.0 - n_selected_high / n_high_talent if n_high_talent > 0 else np.nan
+
+        stage_quarters = quarter_metrics.loc[quarter_metrics["stage"] == stage]
+
+        quarter_losses = {
+            int(row.birth_quarter): row.talent_loss for row in stage_quarters.itertuples()
+        }
+
+        finite_losses = [value for value in quarter_losses.values() if np.isfinite(value)]
+
+        opportunity_gap = (
+            max(finite_losses) - min(finite_losses) if len(finite_losses) >= 2 else np.nan
+        )
+
+        mean_selected = float(selected["target"].mean()) if n_selected > 0 else np.nan
+
+        oracle_mean = float(oracle_targets[:n_selected].mean()) if n_selected > 0 else np.nan
+
+        regret_value = oracle_mean - mean_selected if n_selected > 0 else np.nan
+
+        # Q1/Q4 selection-rate ratio uses initial quarter populations.
+        selected_counts = selected.groupby("birth_quarter")["athlete_id"].nunique()
+
+        q1_initial = int(initial_counts.get(1, 0))
+        q4_initial = int(initial_counts.get(4, 0))
+
+        if q1_initial == 0 or q4_initial == 0:
+            selection_ratio = np.nan
+        else:
+            q1_rate = int(selected_counts.get(1, 0)) / q1_initial
+            q4_rate = int(selected_counts.get(4, 0)) / q4_initial
+
+            selection_ratio = q1_rate / q4_rate if q4_rate > 0 else np.inf
+
+        rows.append(
+            {
+                "stage": int(stage),
+                "n_selected": n_selected,
+                "n_high_talent": n_high_talent,
+                "n_selected_high_talent": n_selected_high,
+                "overall_talent_loss": overall_loss,
+                "talent_loss_q1": quarter_losses[1],
+                "talent_loss_q2": quarter_losses[2],
+                "talent_loss_q3": quarter_losses[3],
+                "talent_loss_q4": quarter_losses[4],
+                "equal_opportunity_gap": opportunity_gap,
+                "mean_selected_talent": mean_selected,
+                "regret": regret_value,
+                "selection_rate_ratio_q1_q4": selection_ratio,
+            }
+        )
+
+    return pd.DataFrame(rows)
