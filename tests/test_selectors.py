@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from rae.selectors import (
+    OracleSelector,
     PerformanceSelector,
     ScoutSelector,
     StageContext,
@@ -12,7 +13,13 @@ from rae.selectors import (
 )
 
 
-def create_context(history, maturity=None, judgement_noise=None):
+def create_context(
+    history,
+    maturity=None,
+    judgement_noise=None,
+    talent=None,
+    adult_maturation_weight=0.0,
+):
     """Create a reproducible stage context for selector tests."""
     history = np.asarray(history, dtype=float)
     n_candidates = history.shape[1]
@@ -24,9 +31,13 @@ def create_context(history, maturity=None, judgement_noise=None):
     if judgement_noise is None:
         judgement_noise = np.zeros(n_candidates)
 
+    if talent is None:
+        talent = np.zeros(n_candidates)
+
     candidates = pd.DataFrame(
         {
             "athlete_id": np.arange(n_candidates),
+            "talent": talent,
             "maturity": maturity,
         }
     )
@@ -37,6 +48,7 @@ def create_context(history, maturity=None, judgement_noise=None):
         candidates=candidates,
         history=history,
         judgement_noise=np.asarray(judgement_noise, dtype=float),
+        adult_maturation_weight=adult_maturation_weight,
     )
 
 
@@ -269,4 +281,75 @@ def test_context_rejects_inconsistent_history_shape():
             candidates=pd.DataFrame({"athlete_id": [0, 1], "maturity": [0.0, 0.0]}),
             history=np.array([[1.0, 2.0]]),
             judgement_noise=np.zeros(2),
+        )
+
+
+def test_oracle_uses_latent_talent_when_adult_maturation_weight_is_zero():
+    """With kappa equal to zero, Oracle scores must equal latent talent."""
+    context = create_context(
+        history=[[0.0, 0.0, 0.0]],
+        talent=[0.8, 0.2, 0.5],
+        maturity=[1.0, 3.0, 2.0],
+    )
+
+    scores = OracleSelector().scores(context)
+
+    np.testing.assert_allclose(scores, [0.8, 0.2, 0.5])
+
+
+def test_oracle_includes_adult_maturation_component():
+    """Oracle scores must include the configured adult maturity contribution."""
+    context = create_context(
+        history=[[0.0, 0.0, 0.0]],
+        talent=[0.8, 0.2, 0.5],
+        maturity=[1.0, 3.0, 2.0],
+        adult_maturation_weight=0.5,
+    )
+
+    scores = OracleSelector().scores(context)
+
+    expected = np.array([1.3, 1.7, 1.5])
+
+    np.testing.assert_allclose(scores, expected)
+
+
+def test_oracle_requires_talent_and_maturity_columns():
+    """Oracle must reject candidates without latent target information."""
+    context = create_context(
+        history=[[0.0, 0.0]],
+        talent=[0.5, 0.8],
+        maturity=[0.2, 0.4],
+    )
+
+    context = StageContext(
+        stage=context.stage,
+        n_stages=context.n_stages,
+        candidates=context.candidates.drop(columns="talent"),
+        history=context.history,
+        judgement_noise=context.judgement_noise,
+    )
+
+    with pytest.raises(ValueError):
+        OracleSelector().scores(context)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-0.1, np.nan, np.inf, -np.inf],
+)
+def test_context_rejects_invalid_adult_maturation_weight(value):
+    """Adult maturation weight must be finite and non-negative."""
+    with pytest.raises(ValueError):
+        create_context(
+            history=[[0.0, 0.0]],
+            adult_maturation_weight=value,
+        )
+
+
+def test_context_rejects_non_numeric_adult_maturation_weight():
+    """Adult maturation weight cannot be a string or boolean."""
+    with pytest.raises(TypeError):
+        create_context(
+            history=[[0.0, 0.0]],
+            adult_maturation_weight=True,
         )

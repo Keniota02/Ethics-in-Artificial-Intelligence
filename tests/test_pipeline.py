@@ -6,7 +6,7 @@ import pytest
 
 from rae.config import SimConfig
 from rae.pipeline import simulate, simulate_pipeline
-from rae.selectors import PerformanceSelector, ScoutSelector
+from rae.selectors import OracleSelector, PerformanceSelector, ScoutSelector
 
 
 def create_test_population(n=20, seed=42):
@@ -607,3 +607,94 @@ def test_simulate_rejects_invalid_configuration_type():
     """The high-level simulation must require a SimConfig instance."""
     with pytest.raises(TypeError):
         simulate({"n_athletes": 100})
+
+
+def test_oracle_selector_integrates_with_pipeline():
+    """Oracle must rank candidates by adult potential."""
+    population = pd.DataFrame(
+        {
+            "athlete_id": [0, 1, 2, 3],
+            "talent": [10.0, 9.0, 8.0, 7.0],
+            "maturity": [-10.0, 0.0, 0.0, 0.0],
+        }
+    )
+
+    result = simulate_pipeline(
+        population,
+        stage_fractions=(0.5,),
+        beta_m=0.0,
+        sigma_p=0.0,
+        dropout_unselected=0.0,
+        rng=np.random.default_rng(43),
+        selector=OracleSelector(),
+        adult_maturation_weight=1.0,
+    )
+
+    selected_ids = set(
+        result.loc[
+            (result["stage"] == 0) & result["selected"],
+            "athlete_id",
+        ]
+    )
+
+    # Adult potential: [0, 9, 8, 7].
+    assert selected_ids == {1, 2}
+
+
+def test_simulate_passes_adult_maturation_weight_to_oracle():
+    """SimConfig must control the Oracle's adult-potential target."""
+    config = SimConfig(
+        n_athletes=100,
+        stage_fractions=(0.2,),
+        maturation_weight=0.0,
+        adult_maturation_weight=1.5,
+        noise_sd=0.0,
+        dropout_unselected=0.0,
+        seed=43,
+    )
+
+    result = simulate(config, selector=OracleSelector())
+
+    first_stage = result[result["stage"] == 0].copy()
+
+    adult_potential = (
+        first_stage["talent"] + config.adult_maturation_weight * first_stage["maturity"]
+    )
+
+    expected_positions = np.argsort(
+        -adult_potential.to_numpy(),
+        kind="stable",
+    )[: round(config.stage_fractions[0] * config.n_athletes)]
+
+    expected_ids = set(first_stage.iloc[expected_positions]["athlete_id"])
+
+    selected_ids = set(first_stage.loc[first_stage["selected"], "athlete_id"])
+
+    assert selected_ids == expected_ids
+
+
+@pytest.mark.parametrize(
+    "value",
+    [-0.1, np.nan, np.inf, -np.inf],
+)
+def test_invalid_adult_maturation_weight_raises_value_error(value):
+    """Adult maturation weight must be finite and non-negative."""
+    population = create_test_population()
+
+    with pytest.raises(ValueError):
+        simulate_pipeline(
+            population,
+            adult_maturation_weight=value,
+        )
+
+
+@pytest.mark.parametrize("value", [True, "0.5"])
+def test_non_numeric_adult_maturation_weight_raises_type_error(value):
+    """Adult maturation weight must be numeric."""
+    population = create_test_population()
+
+    with pytest.raises(TypeError):
+        simulate_pipeline(
+            population,
+            adult_maturation_weight=value,
+        )
